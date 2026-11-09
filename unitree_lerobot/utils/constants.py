@@ -501,3 +501,13 @@ ROBOT_CONFIGS = {
     "Unitree_G1_Lift_Dex1_NoUseWaist": LIFT_G1_DEX1_NOUSEWAIST_CONFIG,
     "Unitree_Arm_L1": UNIARML1_CONFIG,
 }
+
+# --- ARCA: single head-camera variant (this robot has no wrist cams; mono head) ---
+if "Unitree_G1_Inspire_1Cam" not in ROBOT_CONFIGS:
+    ROBOT_CONFIGS["Unitree_G1_Inspire_1Cam"] = RobotConfig(
+        motors=G1_INSPIRE_CONFIG.motors,
+        cameras=["cam_left_high"],
+        camera_to_image_key={"color_0": "cam_left_high"},
+        json_state_data_name=G1_INSPIRE_CONFIG.json_state_data_name,
+        json_action_data_name=G1_INSPIRE_CONFIG.json_action_data_name,
+    )

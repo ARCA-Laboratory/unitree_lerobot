@@ -60,6 +60,15 @@ EE_CONFIG: dict[str, dict[str, Any]] = {
         "shared_mem_size": 6,
         # "out_len": 12,
     },
+    # Alias matching xr_teleoperate's `--ee inspire_dfx` naming (same DDS topics
+    # rt/inspire/{cmd,state}, same joint ordering) -- our hardware runs two
+    # h1_inspire_service instances bridged by scripts/inspire_dfx_relay.py.
+    "inspire_dfx": {
+        "controller": Inspire_Controller,
+        "dof": 6,
+        "shared_mem_type": "Array",
+        "shared_mem_size": 6,
+    },
     "brainco": {
         "controller": Brainco_Controller,
         "dof": 6,
@@ -89,7 +98,15 @@ def setup_robot_interface(args: argparse.Namespace) -> dict[str, Any]:
     """
     # ---------- Arm ----------
     arm_spec = ARM_CONFIG[args.arm]
-    arm_ik = arm_spec["ik_solver"]()
+    # eval_g1.py / eval_g1_dataset.py / replay_robot.py only ever call solve_tau
+    # (gravity-comp torque for an already-known joint config), never solve_ik
+    # (Cartesian IK) -- skip building the casadi-based IK solver G1_29_ArmIK
+    # otherwise builds eagerly, since pinocchio's casadi bindings aren't present
+    # on every install.
+    if args.arm == "G1_29":
+        arm_ik = arm_spec["ik_solver"](build_casadi_ik=False)
+    else:
+        arm_ik = arm_spec["ik_solver"]()
     is_sim = getattr(args, "sim", False)
     arm_ctrl = arm_spec["controller"](motion_mode=args.motion, simulation_mode=is_sim)
 

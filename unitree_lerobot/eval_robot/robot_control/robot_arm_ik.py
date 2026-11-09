@@ -1,10 +1,18 @@
-import casadi
 import meshcat.geometry as mg
 import numpy as np
 import pinocchio as pin
 import time
-from pinocchio import casadi as cpin
 from pinocchio.visualize import MeshcatVisualizer
+
+try:
+    # Not available on every pinocchio install (numpy>=2 wheels drop the casadi
+    # bindings) -- only G1_29_ArmIK.solve_tau is exercised with build_casadi_ik=False
+    # when this is missing; every other use of this file needs it as before.
+    import casadi
+    from pinocchio import casadi as cpin
+except ImportError:
+    casadi = None
+    cpin = None
 import os
 import sys
 from unitree_lerobot.eval_robot.utils.weighted_moving_filter import WeightedMovingFilter
@@ -18,11 +26,12 @@ sys.path.append(parent2_dir)
 
 
 class G1_29_ArmIK:
-    def __init__(self, Unit_Test=False, Visualization=False):
+    def __init__(self, Unit_Test=False, Visualization=False, build_casadi_ik=True):
         np.set_printoptions(precision=5, suppress=True, linewidth=200)
 
         self.Unit_Test = Unit_Test
         self.Visualization = Visualization
+        self.build_casadi_ik = build_casadi_ik
 
         if not self.Unit_Test:
             self.robot = pin.RobotWrapper.BuildFromURDF(
@@ -95,68 +104,85 @@ class G1_29_ArmIK:
         # for idx, name in enumerate(self.reduced_robot.model.names):
         #     logger_mp.debug(f"{idx}: {name}")
 
-        # Creating Casadi models and data for symbolic computing
-        self.cmodel = cpin.Model(self.reduced_robot.model)
-        self.cdata = self.cmodel.createData()
-
-        # Creating symbolic variables
-        self.cq = casadi.SX.sym("q", self.reduced_robot.model.nq, 1)
-        self.cTf_l = casadi.SX.sym("tf_l", 4, 4)
-        self.cTf_r = casadi.SX.sym("tf_r", 4, 4)
-        cpin.framesForwardKinematics(self.cmodel, self.cdata, self.cq)
-
-        # Get the hand joint ID and define the error function
-        self.L_hand_id = self.reduced_robot.model.getFrameId("L_ee")
-        self.R_hand_id = self.reduced_robot.model.getFrameId("R_ee")
-
-        self.translational_error = casadi.Function(
-            "translational_error",
-            [self.cq, self.cTf_l, self.cTf_r],
-            [
-                casadi.vertcat(
-                    self.cdata.oMf[self.L_hand_id].translation - self.cTf_l[:3, 3],
-                    self.cdata.oMf[self.R_hand_id].translation - self.cTf_r[:3, 3],
+        # Casadi-based symbolic IK (solve_ik) is only needed by callers that do
+        # Cartesian-pose IK; solve_tau (gravity-compensation torque from a known
+        # joint config) only needs plain pinocchio above. pinocchio's casadi
+        # bindings aren't available on every install (numpy>=2 pinocchio wheels
+        # drop them), so skip building this when the caller only needs solve_tau.
+        if self.build_casadi_ik:
+            if casadi is None:
+                raise ImportError(
+                    "casadi / pinocchio.casadi not available in this environment -- "
+                    "construct G1_29_ArmIK(build_casadi_ik=False) if only solve_tau is needed."
                 )
-            ],
-        )
-        self.rotational_error = casadi.Function(
-            "rotational_error",
-            [self.cq, self.cTf_l, self.cTf_r],
-            [
-                casadi.vertcat(
-                    cpin.log3(self.cdata.oMf[self.L_hand_id].rotation @ self.cTf_l[:3, :3].T),
-                    cpin.log3(self.cdata.oMf[self.R_hand_id].rotation @ self.cTf_r[:3, :3].T),
-                )
-            ],
-        )
 
-        # Defining the optimization problem
-        self.opti = casadi.Opti()
-        self.var_q = self.opti.variable(self.reduced_robot.model.nq)
-        self.var_q_last = self.opti.parameter(self.reduced_robot.model.nq)  # for smooth
-        self.param_tf_l = self.opti.parameter(4, 4)
-        self.param_tf_r = self.opti.parameter(4, 4)
-        self.translational_cost = casadi.sumsqr(self.translational_error(self.var_q, self.param_tf_l, self.param_tf_r))
-        self.rotation_cost = casadi.sumsqr(self.rotational_error(self.var_q, self.param_tf_l, self.param_tf_r))
-        self.regularization_cost = casadi.sumsqr(self.var_q)
-        self.smooth_cost = casadi.sumsqr(self.var_q - self.var_q_last)
+            # Creating Casadi models and data for symbolic computing
+            self.cmodel = cpin.Model(self.reduced_robot.model)
+            self.cdata = self.cmodel.createData()
 
-        # Setting optimization constraints and goals
-        self.opti.subject_to(
-            self.opti.bounded(
-                self.reduced_robot.model.lowerPositionLimit, self.var_q, self.reduced_robot.model.upperPositionLimit
+            # Creating symbolic variables
+            self.cq = casadi.SX.sym("q", self.reduced_robot.model.nq, 1)
+            self.cTf_l = casadi.SX.sym("tf_l", 4, 4)
+            self.cTf_r = casadi.SX.sym("tf_r", 4, 4)
+            cpin.framesForwardKinematics(self.cmodel, self.cdata, self.cq)
+
+            # Get the hand joint ID and define the error function
+            self.L_hand_id = self.reduced_robot.model.getFrameId("L_ee")
+            self.R_hand_id = self.reduced_robot.model.getFrameId("R_ee")
+
+            self.translational_error = casadi.Function(
+                "translational_error",
+                [self.cq, self.cTf_l, self.cTf_r],
+                [
+                    casadi.vertcat(
+                        self.cdata.oMf[self.L_hand_id].translation - self.cTf_l[:3, 3],
+                        self.cdata.oMf[self.R_hand_id].translation - self.cTf_r[:3, 3],
+                    )
+                ],
             )
-        )
-        self.opti.minimize(
-            50 * self.translational_cost + self.rotation_cost + 0.02 * self.regularization_cost + 0.1 * self.smooth_cost
-        )
+            self.rotational_error = casadi.Function(
+                "rotational_error",
+                [self.cq, self.cTf_l, self.cTf_r],
+                [
+                    casadi.vertcat(
+                        cpin.log3(self.cdata.oMf[self.L_hand_id].rotation @ self.cTf_l[:3, :3].T),
+                        cpin.log3(self.cdata.oMf[self.R_hand_id].rotation @ self.cTf_r[:3, :3].T),
+                    )
+                ],
+            )
 
-        opts = {
-            "ipopt": {"print_level": 0, "max_iter": 50, "tol": 1e-6},
-            "print_time": False,  # print or not
-            "calc_lam_p": False,  # https://github.com/casadi/casadi/wiki/FAQ:-Why-am-I-getting-%22NaN-detected%22in-my-optimization%3F
-        }
-        self.opti.solver("ipopt", opts)
+            # Defining the optimization problem
+            self.opti = casadi.Opti()
+            self.var_q = self.opti.variable(self.reduced_robot.model.nq)
+            self.var_q_last = self.opti.parameter(self.reduced_robot.model.nq)  # for smooth
+            self.param_tf_l = self.opti.parameter(4, 4)
+            self.param_tf_r = self.opti.parameter(4, 4)
+            self.translational_cost = casadi.sumsqr(
+                self.translational_error(self.var_q, self.param_tf_l, self.param_tf_r)
+            )
+            self.rotation_cost = casadi.sumsqr(self.rotational_error(self.var_q, self.param_tf_l, self.param_tf_r))
+            self.regularization_cost = casadi.sumsqr(self.var_q)
+            self.smooth_cost = casadi.sumsqr(self.var_q - self.var_q_last)
+
+            # Setting optimization constraints and goals
+            self.opti.subject_to(
+                self.opti.bounded(
+                    self.reduced_robot.model.lowerPositionLimit, self.var_q, self.reduced_robot.model.upperPositionLimit
+                )
+            )
+            self.opti.minimize(
+                50 * self.translational_cost
+                + self.rotation_cost
+                + 0.02 * self.regularization_cost
+                + 0.1 * self.smooth_cost
+            )
+
+            opts = {
+                "ipopt": {"print_level": 0, "max_iter": 50, "tol": 1e-6},
+                "print_time": False,  # print or not
+                "calc_lam_p": False,  # https://github.com/casadi/casadi/wiki/FAQ:-Why-am-I-getting-%22NaN-detected%22in-my-optimization%3F
+            }
+            self.opti.solver("ipopt", opts)
 
         self.init_data = np.zeros(self.reduced_robot.model.nq)
         self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14)

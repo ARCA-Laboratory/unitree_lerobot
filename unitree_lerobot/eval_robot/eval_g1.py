@@ -34,11 +34,11 @@ from unitree_lerobot.eval_robot.make_robot import (
     process_images_and_observations,
 )
 from unitree_lerobot.eval_robot.utils.utils import (
-    cleanup_resources,
     predict_action,
     to_list,
     to_scalar,
     EvalRealConfig,
+    MotionSwitcher,
 )
 from unitree_lerobot.eval_robot.utils.rerun_visualizer import RerunLogger, visualization_data
 
@@ -68,26 +68,31 @@ def eval_policy(
         preprocessor.reset()
         postprocessor.reset()
 
-    image_info = None
+    image_client = None
     try:
         # --- Setup Phase ---
-        image_info = setup_image_client(cfg)
+        image_client, camera_config = setup_image_client(cfg)
+
+        # Suspend the onboard loco controller so rt/lowcmd is accepted -- same
+        # handshake as scripts/replay_episode.py / xr_teleoperate's teleop session.
+        from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+
+        ChannelFactoryInitialize(0)
+        ms = MotionSwitcher()
+        debug_status, debug_result = ms.Enter_Debug_Mode()
+        logger_mp.info(f"Enter_Debug_Mode -> status={debug_status} result={debug_result}")
+        if debug_status != 0:
+            raise RuntimeError(
+                "Debug Mode did not engage -- rt/lowcmd would fight the onboard controller. "
+                "Is the robot powered and in a safe standing/suspended state?"
+            )
+        time.sleep(1.0)
+
         robot_interface = setup_robot_interface(cfg)
 
         # Unpack interfaces for convenience
         arm_ctrl, arm_ik, ee_shared_mem, arm_dof, ee_dof = (
             robot_interface[key] for key in ["arm_ctrl", "arm_ik", "ee_shared_mem", "arm_dof", "ee_dof"]
-        )
-        tv_img_array, wrist_img_array, tv_img_shape, wrist_img_shape, is_binocular, has_wrist_cam = (
-            image_info[key]
-            for key in [
-                "tv_img_array",
-                "wrist_img_array",
-                "tv_img_shape",
-                "wrist_img_shape",
-                "is_binocular",
-                "has_wrist_cam",
-            ]
         )
 
         # Get initial pose from the first step of the dataset
@@ -111,7 +116,7 @@ def eval_policy(
                 loop_start_time = time.perf_counter()
                 # 1. Get Observations
                 observation, current_arm_q = process_images_and_observations(
-                    tv_img_array, wrist_img_array, tv_img_shape, wrist_img_shape, is_binocular, has_wrist_cam, arm_ctrl
+                    image_client, camera_config, arm_ctrl
                 )
                 left_ee_state = right_ee_state = np.array([])
                 if cfg.ee:
@@ -145,7 +150,8 @@ def eval_policy(
                     ee_action_start_idx = arm_dof
                     left_ee_action = action_np[ee_action_start_idx : ee_action_start_idx + ee_dof]
                     right_ee_action = action_np[ee_action_start_idx + ee_dof : ee_action_start_idx + 2 * ee_dof]
-                    # logger_mp.info(f"EE Action: left {left_ee_action}, right {right_ee_action}")
+                    if idx % 15 == 0:
+                        logger_mp.info(f"EE Action: left {left_ee_action}, right {right_ee_action}")
 
                     if isinstance(ee_shared_mem["left"], SynchronizedArray):
                         ee_shared_mem["left"][:] = to_list(left_ee_action)
@@ -162,8 +168,8 @@ def eval_policy(
     except Exception as e:
         logger_mp.info(f"An error occurred: {e}")
     finally:
-        if image_info:
-            cleanup_resources(image_info)
+        if image_client:
+            image_client.close()
 
 
 @parser.wrap()

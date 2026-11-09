@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import torch
 from typing import Any
@@ -15,6 +16,39 @@ import logging_mp
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
+
+
+class MotionSwitcher:
+    """Suspends the onboard loco controller so rt/lowcmd is accepted.
+
+    Mirrors xr_teleoperate's teleop/utils/motion_switcher.py (the handshake our
+    real-robot teleop and scripts/replay_episode.py already rely on) -- reimplemented
+    here directly on unitree_sdk2py so this package doesn't need to import xr_teleoperate.
+    """
+
+    def __init__(self):
+        from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
+
+        self.msc = MotionSwitcherClient()
+        self.msc.SetTimeout(1.0)
+        self.msc.Init()
+
+    def Enter_Debug_Mode(self):
+        try:
+            status, result = self.msc.CheckMode()
+            while result["name"]:
+                self.msc.ReleaseMode()
+                status, result = self.msc.CheckMode()
+                time.sleep(1)
+            return status, result
+        except Exception:
+            return None, None
+
+    def Exit_Debug_Mode(self):
+        try:
+            return self.msc.SelectMode(nameOrAlias="ai")
+        except Exception:
+            return None, None
 
 
 def extract_observation(step: dict):
@@ -120,6 +154,9 @@ class EvalRealConfig:
     root: str = ""
     episodes: int = 0
     frequency: float = 30.0
+
+    # Image server (teleimager) to pull live camera frames from
+    image_host: str = "192.168.123.164"
 
     # Basic control parameters
     arm: str = "G1_29"  # G1_29, G1_23
