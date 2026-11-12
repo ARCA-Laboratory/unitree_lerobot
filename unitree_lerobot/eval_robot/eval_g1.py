@@ -104,6 +104,10 @@ def eval_policy(
         idx = 0
         print(f"user_input: {user_input}")
         full_state = None
+        # Seeded from the recorded initial pose, matching how patch_stack_block_hand_state.py
+        # seeds frame 0 (no t-1 before episode start -- uses action[0] itself there too).
+        prev_left_ee_action = step["observation.state"][arm_dof : arm_dof + ee_dof].cpu().numpy() if cfg.ee else None
+        prev_right_ee_action = step["observation.state"][arm_dof + ee_dof : arm_dof + 2 * ee_dof].cpu().numpy() if cfg.ee else None
         if user_input.lower() == "s":
             # "The initial positions of the robot's arm and fingers take the initial positions during data recording."
             logger_mp.info("Initializing robot to starting pose...")
@@ -120,10 +124,14 @@ def eval_policy(
                 )
                 left_ee_state = right_ee_state = np.array([])
                 if cfg.ee:
-                    with ee_shared_mem["lock"]:
-                        full_state = np.array(ee_shared_mem["state"][:])
-                        left_ee_state = full_state[:ee_dof]
-                        right_ee_state = full_state[ee_dof:]
+                    if cfg.last_command_as_hand_state:
+                        left_ee_state = prev_left_ee_action
+                        right_ee_state = prev_right_ee_action
+                    else:
+                        with ee_shared_mem["lock"]:
+                            full_state = np.array(ee_shared_mem["state"][:])
+                            left_ee_state = full_state[:ee_dof]
+                            right_ee_state = full_state[ee_dof:]
                 state_tensor = torch.from_numpy(
                     np.concatenate((current_arm_q, left_ee_state, right_ee_state), axis=0)
                 ).float()
@@ -150,8 +158,14 @@ def eval_policy(
                     ee_action_start_idx = arm_dof
                     left_ee_action = action_np[ee_action_start_idx : ee_action_start_idx + ee_dof]
                     right_ee_action = action_np[ee_action_start_idx + ee_dof : ee_action_start_idx + 2 * ee_dof]
+                    if cfg.round_hand_binary:
+                        left_ee_action = np.round(left_ee_action)
+                        right_ee_action = np.round(right_ee_action)
                     if idx % 15 == 0:
                         logger_mp.info(f"EE Action: left {left_ee_action}, right {right_ee_action}")
+                    # tracked regardless of last_command_as_hand_state so switching the flag
+                    # mid-run (e.g. via future config reload) never reads a stale None
+                    prev_left_ee_action, prev_right_ee_action = left_ee_action, right_ee_action
 
                     if isinstance(ee_shared_mem["left"], SynchronizedArray):
                         ee_shared_mem["left"][:] = to_list(left_ee_action)

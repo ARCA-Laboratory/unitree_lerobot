@@ -169,6 +169,17 @@ class EvalRealConfig:
     send_real_robot: bool = False
     use_dataset: bool = False
 
+    # Both off by default -- unchanged behavior unless explicitly requested. Needed to
+    # match how the stack_block_50ep_statefix* checkpoints were trained (2026-11-12/13):
+    # observation.state's hand dims were filled from action(t-1), not genuine DDS hand
+    # state (which was found frozen/broken in every recorded episode - see
+    # docs/imitation-learning-tutorial.md §6). Using genuine live hand state at inference
+    # against a checkpoint trained on the action(t-1) proxy would be a train/deploy
+    # mismatch in the other direction.
+    last_command_as_hand_state: bool = False
+    # Matches checkpoints trained on scripts/patch_stack_block_hand_state.py --binarize-hand.
+    round_hand_binary: bool = False
+
     rename_map: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
