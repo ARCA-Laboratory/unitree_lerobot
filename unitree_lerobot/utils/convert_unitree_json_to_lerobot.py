@@ -284,6 +284,7 @@ def populate_dataset(
     dataset: LeRobotDataset,
     raw_dir: Path,
     robot_type: str,
+    trim_frames: int = 0,
 ) -> LeRobotDataset:
     json_dataset = JsonDataset(raw_dir, robot_type)
     for i in tqdm.tqdm(range(len(json_dataset))):
@@ -295,7 +296,17 @@ def populate_dataset(
         task = episode["task"]
         episode_length = episode["episode_length"]
 
-        num_frames = episode_length
+        # Drop the first `trim_frames` frames (e.g. the episode-start glitch from
+        # create_episode()'s pre-fix blocking RerunLogger respawn, see README's
+        # 2026-11-13 entry) before adding the rest, rather than patching rows out of an
+        # already-converted dataset -- this way meta/episodes' per-column stats are computed
+        # fresh over exactly the frames kept, instead of risking desync from a retrofit.
+        start = min(trim_frames, episode_length)
+        state = state[start:]
+        action = action[start:]
+        cameras = {cam: imgs[start:] for cam, imgs in cameras.items()}
+
+        num_frames = episode_length - start
         for i in range(num_frames):
             frame = {
                 "observation.state": state[i],
@@ -320,6 +331,7 @@ def json_to_lerobot(
     *,
     push_to_hub: bool = False,
     mode: Literal["video", "image"] = "video",
+    trim_frames: int = 0,  # drop this many frames from the start of every episode
     dataset_config: DatasetConfig = DEFAULT_DATASET_CONFIG,
 ):
     if (HF_LEROBOT_HOME / repo_id).exists():
@@ -337,6 +349,7 @@ def json_to_lerobot(
         dataset,
         raw_dir,
         robot_type=robot_type,
+        trim_frames=trim_frames,
     )
 
     if push_to_hub:
